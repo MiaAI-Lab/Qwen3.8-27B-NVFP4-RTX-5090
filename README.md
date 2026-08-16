@@ -1,5 +1,12 @@
 # Qwen3.8-27B-NVFP4 on a Single RTX 5090 (vLLM)
 
+<p align="center">
+  <sub>by <a href="https://x.com/MiaAI_lab">Mia'a AI Lab</a></sub>
+  <br><br>
+  <a href="https://ko-fi.com/Z8Z3SPLOD" target="_blank" rel="noopener noreferrer" style="display:inline-block;margin:0 8px;vertical-align:middle;"><img src="https://storage.ko-fi.com/cdn/kofi6.png?v=6" alt="Buy Me a Coffee at ko-fi.com" height="28" style="height:28px;width:auto;vertical-align:middle;border:0;" /></a>
+  <a href="https://x.com/MiaAI_lab" target="_blank" rel="noopener noreferrer" style="display:inline-block;margin:0 8px;vertical-align:middle;"><img src="https://img.shields.io/badge/Follow%20me%20on%20X-000000?style=for-the-badge&logo=x&logoColor=white" alt="Follow Mia on X" height="28" style="height:28px;width:auto;vertical-align:middle;border:0;" /></a>
+</p>
+
 One script to serve **RadixArk/Qwen3.8-27B-NVFP4** with [vLLM](https://github.com/vllm-project/vllm) 0.27.x on a **single NVIDIA RTX 5090 (32 GB, sm_120)** — full native **256K context**, **TurboQuant 4-bit KV cache** pinned at 5.5 GiB, and **MTP-3 speculative decoding**, exposed as an OpenAI-compatible API.
 
 Works fine on a desktop GPU that still drives a display (adaptive `--gpu-memory-utilization` from live `nvidia-smi`).
