@@ -167,6 +167,7 @@ pkill -f 'VLLM::EngineCore'
 - **Desktop cohabitation** — GPU util is derived from *live free* memory, so the desktop's 1–2 GiB are respected. If you run headless, you can push `GPU_UTIL=0.9` or higher… you won't gain anything for a single stream.
 - **Model download interrupted** — just re-run `./start.sh`; `snapshot_download` resumes.
 - **Patch fails to apply** (`anchor not found`) — the installed vLLM no longer matches the 0.27.1 layout. Check whether PR #40914 has merged upstream before serving, since stock MTP×TurboQuant garbles output.
+- **Enabling `enable_thinking: true` needs `thinking_token_budget` too** — every example above sets `enable_thinking: false`. If you flip it on to get reasoning traces, also set the top-level request field `thinking_token_budget` (e.g. `1024`), not just `chat_template_kwargs`. Without it, the model can burn the entire `max_tokens` budget on hidden chain-of-thought and return empty `content` with `finish_reason: length` — silent zero-output, not an error. `thinking_token_budget` forces the reasoning to wrap up once the budget is hit so the actual answer still gets generated; it's a first-class vLLM `SamplingParams`/protocol field (`vllm/sampling_params.py`, enforced by `ThinkingBudgetStateHolder`), not something specific to this script. Note it's independent of `max_tokens` — sizing the thinking budget doesn't guarantee the final answer fits too, so leave headroom in `max_tokens` for both.
 
 ## Repository layout
 
