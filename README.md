@@ -105,6 +105,73 @@ All knobs are environment variables, with sensible defaults:
 | `GPU_UTIL` | auto from live `nvidia-smi` | `--gpu-memory-utilization` override |
 | `PYTORCH_CUDA_ALLOC_CONF` | `expandable_segments:True` | leave it — MTP-3 OOMs otherwise |
 | `VLLM_USE_FLASHINFER_SAMPLER` | `0` | set `1` only if you have a CUDA toolkit with `nvcc` |
+| `PROFILE` | `default` | `default` = the profile above; `fast-128k` = see [Opt-in profile: fast-128k](#opt-in-profile-fast-128k) |
+
+## Opt-in profile: fast-128k
+
+```bash
+PROFILE=fast-128k ./start.sh
+```
+
+Same stack, same patch, same single session; four values change. If you don't need more than 128K of context,
+it decodes faster and prefills about twice as fast:
+
+| | `default` | `fast-128k` |
+|---|---|---|
+| `--max-model-len` | 262144 | 131072 |
+| `--kv-cache-memory-bytes` | 5905580032 (5.5 GiB, 286,466-token pool) | 3758096384 (3.5 GiB, 137,313-token pool) |
+| MTP `num_speculative_tokens` | 3 | 6 |
+| `--max-num-batched-tokens` | 512 | 2048 |
+| `--compilation-config` | (vLLM default) | `{"compile_ranges_endpoints":[8,2048]}` |
+
+Why each lever:
+
+- **MTP-6.** On its own it gives +26–29% greedy decode. Mean accepted length per step goes from 2.9–3.6 to 3.0–5.7, depending on the prompt.
+- **2048-token prefill chunks.** On their own they make prefill about 2x faster at 8K–64K.
+- **The compile-range split.** With 2048-token chunks, the 7-token MTP-6 verify step shares one torch.compile range (1–2048) with prefill, and decode loses about 7–10%. The `[8, 2048]` endpoint gives steps of 8 tokens or fewer their own range and recovers it.
+- **The 3.5 GiB pin.** It holds 128K plus the MTP-6 drafts. 3.0 GiB is too small for MTP-6 at 128K, and the server refuses to start. The smaller pin also leaves about 2 GB more for a desktop on the same card.
+
+### Measured (RTX 5090, same box, same harness, same day)
+
+Setup:
+- `start.sh` @ `a5f9bff`, with only the four values above changed.
+- Software: vLLM 0.27.1 + this repo's #40914 backport, torch 2.13.0+cu130, flashinfer-python 0.6.16.post3, nvidia-cutlass-dsl 4.6.0.
+- Model: `RadixArk/Qwen3.8-27B-NVFP4` @ `319f741c`.
+- Machine: Windows 11 + WSL2 Ubuntu (4 vCPU, 8 GB to the VM), WDDM driver 621.01. The 5090 also drives the desktop, which holds about 2 GB of VRAM.
+- Each config is a fresh server start plus this repo's 26K warm-up, then the bench.
+
+Bench: [`bench/bench.py`](bench/bench.py).
+- Decode: 3 prompts (prose / code / JSON), 512 new tokens each, greedy, thinking off, streamed. TTFT is excluded. The value is the median over all requests.
+- Prefill: 3 nonce-prefixed prompts per size, `max_tokens 1`, wall time median.
+
+```bash
+.venv/bin/python bench/bench.py --runs 5 --tokenizer "$MODEL_DIR/tokenizer.json" decode prefill
+```
+
+| Config | Decode median tok/s (n) | prose / code / json | Prefill 8K / 32K / 63.5K (s) | Whole-GPU MiB at load (incl. desktop, of 32,607) |
+|---|---|---|---|---|
+| `default` | 117.85 (9) | 82.5 / 119.6 / 120.7 | 1.56 / 6.81 / 16.99 | 30,968 MiB |
+| `default`, re-run at the end (drift check) | 118.09 (9) | 84.6 / 121.4 / 119.0 | 1.66 / 7.06 / 16.76 | 30,553 MiB |
+| MTP-6 only (256K, 5.5 GiB) | 152.20 (15) | 82.0 / 157.3 / 163.4 | 1.64 / 7.21 / 17.24 | 30,565 MiB |
+| 2048 chunks only (256K, 5.5 GiB) | 114.19 (9) | 79.5 / 114.2 / 117.2 | 0.77 / 3.94 / 9.79 | 30,512 MiB |
+| MTP-6 + 2048 + 3.5 GiB, no compile split | 138.17 (15) | 80.7 / 138.2 / 161.5 | 0.78 / 3.99 / 9.91 | 28,047 MiB |
+| **`fast-128k`** | **151.07 (15)** (+28%) | 82.0 / 151.1 / 166.5 | **0.78 / 3.99 / 9.90** (1.7–2.0x) | **28,045 MiB** |
+
+These are absolute numbers from one WSL2 box and this harness. They are lower than the ~160 tok/s quoted above, so compare the ratios.
+
+`fast-128k` passed the same checks as `default`:
+- Garble battery: 0/15 greedy and 0/15 sampled (T 0.7). The battery targets repetition loops and broken tool calls.
+- Quality: 16/16 greedy (10 code tasks with unit tests, 6 exact answers).
+- Tool calls: `tool_choice` auto and required both work, and so does a tool-result turn.
+- Engine errors: 0 over the runs.
+
+Not validated, so check before relying on it:
+- **Long agentic sessions.** We ran the battery, 64K prefills and about an hour of benching, plus about 2 hours of live single-user chat traffic. We did not run long (>40K-token) multi-turn agent sessions.
+- **Prose decode is flat.** It stays at about 82 tok/s; the gain is on code and structured output.
+- **MTP-6 + 2048 chunks at the full 262K.** Not measured. MTP-6 alone does start at 262K with the 5.5 GiB pin (its pool is exactly 262,144 tokens). MTP-7 does not start at that pin.
+- **Native Linux and headless cards.** Not measured; all the numbers above are from WSL2 with a desktop on the card.
+
+The profile was measured and contributed by Yves La Rose (Nether Labs) on top of this recipe.
 
 ## Why the #40914 patch
 
@@ -174,7 +241,8 @@ pkill -f 'VLLM::EngineCore'
 .
 ├── .gitignore    # keeps .venv/, vllm.log, vllm.pid out of git
 ├── README.md
-├── start.sh      # the whole setup: venv → patch → download → serve → warm
+├── start.sh      # the whole setup: venv → patch → download → serve → warm (PROFILE=default|fast-128k)
+├── bench/bench.py # single-stream decode + prefill bench behind the fast-128k table
 ├── stop.sh       # graceful shutdown: TERM → KILL → orphan sweep → verify
 ├── vllm.log      # server log (runtime artifact)
 ├── vllm.pid      # server pid (runtime artifact)
