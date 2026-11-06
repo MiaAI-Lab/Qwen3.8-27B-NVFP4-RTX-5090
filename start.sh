@@ -18,6 +18,13 @@
 #   * downloads the model weights to MODEL_DIR if missing
 #   * starts the server and streams the log until it answers, then returns
 #
+# Profiles (PROFILE=..., default unchanged):
+#   * default    256K context, KV pin 5.5 GiB, MTP-3, 512-token prefill chunks
+#   * fast-128k  128K context, KV pin 3.5 GiB, MTP-6, 2048-token prefill chunks
+#                plus a separate torch.compile range for <=8-token steps;
+#                measured +28% greedy decode and ~1.7-2x faster prefill on a
+#                5090 vs default (see README "Opt-in profile: fast-128k")
+#
 # Env knobs set for you:
 #   * PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True  (MTP-3 OOMs without it)
 #   * VLLM_USE_FLASHINFER_SAMPLER=0  (flashinfer sampler JIT needs nvcc; skip)
@@ -31,8 +38,26 @@ cd "$SCRIPT_DIR"
 
 PORT="${PORT:-8888}"
 SERVED_MODEL_NAME="qwen38-nvfp4"
-MAX_MODEL_LEN=262144                       # native ceiling
-KV_CACHE_BYTES=5905580032                  # 5.5 GiB pin: one full 256K req + MTP drafts needs >5.0 GiB
+PROFILE="${PROFILE:-default}"
+case "$PROFILE" in
+  default)
+    MAX_MODEL_LEN=262144                   # native ceiling
+    KV_CACHE_BYTES=5905580032              # 5.5 GiB pin: one full 256K req + MTP drafts needs >5.0 GiB
+    NUM_SPEC_TOKENS=3
+    MAX_NUM_BATCHED_TOKENS=512             # bound long-prefill activation peaks
+    PROFILE_ARGS=()
+    ;;
+  fast-128k)
+    MAX_MODEL_LEN=131072                   # 128K ceiling
+    KV_CACHE_BYTES=3758096384              # 3.5 GiB pin = 137,313 tokens; 3.0 GiB is too small for MTP-6 at 128K
+    NUM_SPEC_TOKENS=6                      # MTP-6: 7-token verify steps
+    MAX_NUM_BATCHED_TOKENS=2048            # ~2x prefill vs 512
+    # Without a split, 2048-token chunks cost MTP-6 decode ~7-10%: the 7-token
+    # verify step gets its own compiled range (1-8) instead of sharing 1-2048.
+    PROFILE_ARGS=( --compilation-config '{"compile_ranges_endpoints":[8,2048]}' )
+    ;;
+  *) printf '[start.sh] ERROR: unknown PROFILE %s (use: default, fast-128k)\n' "$PROFILE" >&2; exit 1 ;;
+esac
 MODEL_REPO="RadixArk/Qwen3.8-27B-NVFP4"
 MODEL_DIR="${MODEL_DIR:-$HOME/models/RadixArk/Qwen3.8-27B-NVFP4}"
 PINNED_PKGS=( "vllm==0.27.1" "flashinfer-python>=0.6.13" "nvidia-cutlass-dsl>=4.5.2" )
@@ -216,14 +241,15 @@ SERVE_ARGS=(
   --kv-cache-dtype turboquant_4bit_nc
   --kv-cache-memory-bytes "$KV_CACHE_BYTES"
   --max-num-seqs 1                 # MTP + concurrency crashes this KV path
-  --max-num-batched-tokens 512     # bound long-prefill activation peaks
+  --max-num-batched-tokens "$MAX_NUM_BATCHED_TOKENS"
   --gpu-memory-utilization "$GPU_UTIL"
   --attention-config.flash_attn_version=2
   --enable-auto-tool-choice --tool-call-parser qwen3_xml --reasoning-parser qwen3
-  --speculative-config '{"method":"mtp","num_speculative_tokens":3}'
+  --speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":$NUM_SPEC_TOKENS}"
+  ${PROFILE_ARGS[@]+"${PROFILE_ARGS[@]}"}
 )
 
-log "starting vLLM on port $PORT (gpu_util=$GPU_UTIL) …"
+log "starting vLLM on port $PORT (profile=$PROFILE, gpu_util=$GPU_UTIL) …"
 nohup "$VENV/bin/vllm" "${SERVE_ARGS[@]}" >>"$LOG" 2>&1 &
 SERVER_PID=$!
 echo "$SERVER_PID" > "$PID_FILE"
@@ -271,7 +297,7 @@ echo ""
 log "Qwen3.8-27B-NVFP4 is serving"
 log " base URL : http://0.0.0.0:$PORT/v1 (OpenAI-compatible API)"
 log " model    : $SERVED_MODEL_NAME"
-log " profile  : 256K context, turboquant_4bit_nc KV (5.5 GiB), MTP-3, single-session"
+log " profile  : $PROFILE: $((MAX_MODEL_LEN / 1024))K context, turboquant_4bit_nc KV ($(awk "BEGIN{print $KV_CACHE_BYTES/1073741824}") GiB), MTP-$NUM_SPEC_TOKENS, single-session"
 log " log file : $LOG"
 log " stop     : kill \$(cat $PID_FILE); pkill -f VLLM::EngineCore"
 echo ""
