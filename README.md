@@ -19,6 +19,10 @@ On this class of box (RTX 5090, 32 GB):
 - **Full 262,144-token context** resident (KV: 4-bit TurboQuant, 5.5 GiB)
 - **0/15** garble-battery fails **with the built-in PR #40914 patch** (stock 0.27.1 garbles 13/15 — see [Why the patch](#why-the-40914-patch))
 
+## Variants
+
+- [`sglang-dflash2/`](sglang-dflash2/): the same weights on **SGLang 0.5.23 + the DFlash2 drafter**. It decodes about 2x faster (226–249 tok/s greedy on our 5090), and the prefix cache makes repeated chat prefixes nearly free. It runs 48K of context instead of 256K. Measurements and pins are in its README.
+
 ## Requirements
 
 | | |
@@ -176,6 +180,8 @@ pkill -f 'VLLM::EngineCore'
 ├── README.md
 ├── start.sh      # the whole setup: venv → patch → download → serve → warm
 ├── stop.sh       # graceful shutdown: TERM → KILL → orphan sweep → verify
+├── bench/bench.py # single-stream decode + prefill bench
+├── sglang-dflash2/ # variant: SGLang 0.5.23 + DFlash2 (start.sh, stop.sh, two_turn.py, requirements.lock.txt)
 ├── vllm.log      # server log (runtime artifact)
 ├── vllm.pid      # server pid (runtime artifact)
 └── .venv/        # created by start.sh (runtime artifact)
